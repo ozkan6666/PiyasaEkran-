@@ -19,9 +19,6 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Android SDK Kur
-      uses: android-actions/setup-android@v3
-
     - name: Gradle Kur
       uses: gradle/actions/setup-gradle@v3
       with:
