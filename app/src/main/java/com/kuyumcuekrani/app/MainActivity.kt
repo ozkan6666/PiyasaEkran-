@@ -47,12 +47,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.regex.Pattern
 
 enum class PriceSourceType(val displayName: String, val shortName: String) {
     HAREM("Harem Altın", "Harem"),
-    KAPALICARSI("Kapalıçarşı Serbest Piyasa", "Kapalıçarşı"),
     ALTINKAYNAK("Altınkaynak", "Altınkaynak"),
-    ODACI("Odacı Döviz", "Odacı")
+    ODACI("Odacı Döviz", "Odacı"),
+    KAPALICARSI("Kapalıçarşı", "Kapalıçarşı")
 }
 
 enum class PriceCategory(val title: String) {
@@ -114,6 +115,15 @@ object SmartNumberParser {
                 hasComma -> {
                     s.replace(",", ".").toDouble()
                 }
+                hasDot -> {
+                    val parts = s.split(".")
+                    if (parts.size == 2 && parts[1].length == 3 && parts[0].length <= 2) {
+                        // Binlik ayracı olarak nokta kullanımı (örn: 6.671 -> 6671.0)
+                        s.replace(".", "").toDouble()
+                    } else {
+                        s.toDouble()
+                    }
+                }
                 else -> {
                     s.toDouble()
                 }
@@ -125,28 +135,28 @@ object SmartNumberParser {
 }
 
 object NetworkClient {
-    val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
+    val client: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
-    fun getSafeString(url: String, referer: String? = null): String? {
+    fun get(url: String, referer: String? = null): String? {
         return try {
             val reqBuilder = Request.Builder()
                 .url(url)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-                .header("Accept", "application/json, text/plain, */*")
-                .header("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8")
+                .header("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7")
                 .header("Cache-Control", "no-cache")
 
             if (referer != null) {
                 reqBuilder.header("Referer", referer)
             }
 
-            okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+            client.newCall(reqBuilder.build()).execute().use { response ->
                 if (response.isSuccessful) response.body?.string() else null
             }
         } catch (_: Exception) {
@@ -160,215 +170,204 @@ interface IPriceSource {
     suspend fun fetchPrices(): Result<List<PriceItem>>
 }
 
-class UniversalBackupProvider {
-    companion object {
-        suspend fun fetchFromTruncgil(sourceType: PriceSourceType): List<PriceItem>? = withContext(Dispatchers.IO) {
+class HaremPriceSource : IPriceSource {
+    override val sourceType = PriceSourceType.HAREM
+
+    override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
+        val urls = listOf(
+            "https://canlipiyasalar.haremaltin.com/tmp/altin.json" to "https://canlipiyasalar.haremaltin.com/",
+            "https://www.haremaltin.com/dashboard/ajax/doviz" to "https://www.haremaltin.com/"
+        )
+
+        for ((url, referer) in urls) {
             try {
-                val urls = listOf(
-                    "https://finans.truncgil.com/today.json",
-                    "https://finans.truncgil.com/v4/today.json",
-                    "https://finance.truncgil.com/api/today.json"
-                )
-
-                for (url in urls) {
-                    val raw = NetworkClient.getSafeString(url) ?: continue
-                    val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                    val list = mutableListOf<PriceItem>()
-
-                    if (raw.trim().startsWith("{")) {
-                        val root = JSONObject(raw)
-                        val ratesObj = when {
-                            root.has("Rates") -> root.getJSONObject("Rates")
-                            root.has("rates") -> root.getJSONObject("rates")
-                            else -> root
-                        }
-
-                        val mapping = listOf(
-                            Triple("Gram Altın", "Gram Altın", PriceCategory.GOLD),
-                            Triple("gram-altin", "Gram Altın", PriceCategory.GOLD),
-                            Triple("Has Altın", "Has Altın", PriceCategory.GOLD),
-                            Triple("gram-has-altin", "Has Altın", PriceCategory.GOLD),
-                            Triple("Çeyrek Altın", "Çeyrek Yeni", PriceCategory.GOLD),
-                            Triple("ceyrek-altin", "Çeyrek Yeni", PriceCategory.GOLD),
-                            Triple("Yarım Altın", "Yarım Yeni", PriceCategory.GOLD),
-                            Triple("yarim-altin", "Yarım Yeni", PriceCategory.GOLD),
-                            Triple("Tam Altın", "Tam Yeni", PriceCategory.GOLD),
-                            Triple("tam-altin", "Tam Yeni", PriceCategory.GOLD),
-                            Triple("Cumhuriyet Altını", "Cumhuriyet", PriceCategory.GOLD),
-                            Triple("cumhuriyet-altini", "Cumhuriyet", PriceCategory.GOLD),
-                            Triple("Ata Altın", "Ata Altın", PriceCategory.GOLD),
-                            Triple("ata-altin", "Ata Altın", PriceCategory.GOLD),
-                            Triple("22 Ayar Bilezik", "22 Ayar", PriceCategory.GOLD),
-                            Triple("22-ayar-bilezik", "22 Ayar", PriceCategory.GOLD),
-                            Triple("14 Ayar Altın", "14 Ayar", PriceCategory.GOLD),
-                            Triple("14-ayar-altin", "14 Ayar", PriceCategory.GOLD),
-                            Triple("Gremse Altın", "Gremse", PriceCategory.GOLD),
-                            Triple("gremse-altin", "Gremse", PriceCategory.GOLD),
-                            Triple("Ons", "Ons Altın", PriceCategory.PRECIOUS_METALS),
-                            Triple("ons", "Ons Altın", PriceCategory.PRECIOUS_METALS),
-                            Triple("Gümüş", "Gümüş (Gram)", PriceCategory.PRECIOUS_METALS),
-                            Triple("gumus", "Gümüş (Gram)", PriceCategory.PRECIOUS_METALS),
-                            Triple("Dolar", "USD/TRY", PriceCategory.CURRENCY),
-                            Triple("USD", "USD/TRY", PriceCategory.CURRENCY),
-                            Triple("Euro", "EUR/TRY", PriceCategory.CURRENCY),
-                            Triple("EUR", "EUR/TRY", PriceCategory.CURRENCY),
-                            Triple("İngiliz Sterlini", "GBP/TRY", PriceCategory.CURRENCY),
-                            Triple("GBP", "GBP/TRY", PriceCategory.CURRENCY),
-                            Triple("İsviçre Frangı", "CHF/TRY", PriceCategory.CURRENCY),
-                            Triple("CHF", "CHF/TRY", PriceCategory.CURRENCY)
-                        )
-
-                        for ((key, standardName, cat) in mapping) {
-                            if (ratesObj.has(key)) {
-                                val item = ratesObj.optJSONObject(key)
-                                if (item != null) {
-                                    val buy = SmartNumberParser.parse(item.opt("Alış") ?: item.opt("Buying") ?: item.opt("alis"))
-                                    val sell = SmartNumberParser.parse(item.opt("Satış") ?: item.opt("Selling") ?: item.opt("satis"))
-                                    val chg = SmartNumberParser.parse(item.opt("Değişim") ?: item.opt("Change") ?: item.opt("degisim"))
-
-                                    if (buy > 0.0 || sell > 0.0) {
-                                        list.add(
-                                            PriceItem(
-                                                source = sourceType,
-                                                symbol = standardName.uppercase(Locale.ENGLISH).replace("/", "_").replace(" ", "_"),
-                                                name = standardName,
-                                                category = cat,
-                                                buyPrice = if (buy > 0) buy else sell,
-                                                sellPrice = if (sell > 0) sell else buy,
-                                                currency = if (standardName.contains("Ons")) "USD" else "TL",
-                                                changePercent = chg,
-                                                timestamp = timeNow,
-                                                trend = when {
-                                                    chg > 0.0 -> TrendDirection.UP
-                                                    chg < 0.0 -> TrendDirection.DOWN
-                                                    else -> TrendDirection.STABLE
-                                                }
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        if (list.isNotEmpty()) {
-                            return@withContext list.distinctBy { it.name }
-                        }
-                    }
-                }
-                null
-            } catch (_: Exception) {
-                null
-            }
-        }
-
-        suspend fun fetchFromGenelpara(sourceType: PriceSourceType): List<PriceItem>? = withContext(Dispatchers.IO) {
-            try {
-                val goldRaw = NetworkClient.getSafeString("https://api.genelpara.com/embed/altin.json")
-                val currencyRaw = NetworkClient.getSafeString("https://api.genelpara.com/embed/doviz.json")
-                if (goldRaw == null && currencyRaw == null) return@withContext null
-
+                val raw = NetworkClient.get(url, referer) ?: continue
                 val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                 val list = mutableListOf<PriceItem>()
+                val root = JSONObject(raw)
+                val dataObj = if (root.has("data")) root.getJSONObject("data") else root
 
-                if (goldRaw != null) {
-                    val gObj = JSONObject(goldRaw)
-                    val map = listOf(
-                        Pair("GA", "Gram Altın"),
-                        Pair("C", "Çeyrek Yeni"),
-                        Pair("Y", "Yarım Yeni"),
-                        Pair("T", "Tam Yeni"),
-                        Pair("CMR", "Cumhuriyet"),
-                        Pair("ATA", "Ata Altın"),
-                        Pair("B22", "22 Ayar"),
-                        Pair("B14", "14 Ayar"),
-                        Pair("GRE", "Gremse"),
-                        Pair("ONS", "Ons Altın")
-                    )
-                    for ((k, name) in map) {
-                        if (gObj.has(k)) {
-                            val itm = gObj.getJSONObject(k)
-                            val buy = SmartNumberParser.parse(itm.opt("alis"))
-                            val sell = SmartNumberParser.parse(itm.opt("satis"))
-                            val chg = SmartNumberParser.parse(itm.opt("degisim"))
-                            if (buy > 0.0 || sell > 0.0) {
-                                list.add(
-                                    PriceItem(
-                                        source = sourceType,
-                                        symbol = k,
-                                        name = name,
-                                        category = if (k == "ONS") PriceCategory.PRECIOUS_METALS else PriceCategory.GOLD,
-                                        buyPrice = if (buy > 0) buy else sell,
-                                        sellPrice = if (sell > 0) sell else buy,
-                                        currency = if (k == "ONS") "USD" else "TL",
-                                        changePercent = chg,
-                                        timestamp = timeNow,
-                                        trend = if (chg > 0) TrendDirection.UP else if (chg < 0) TrendDirection.DOWN else TrendDirection.STABLE
-                                    )
+                val mappings = listOf(
+                    Triple("ALTIN", "Gram Altın", PriceCategory.GOLD),
+                    Triple("KULCEALTIN", "Has Altın", PriceCategory.GOLD),
+                    Triple("AYAR22", "22 Ayar Bilezik", PriceCategory.GOLD),
+                    Triple("AYAR14", "14 Ayar", PriceCategory.GOLD),
+                    Triple("CEYREK_YENI", "Çeyrek Yeni", PriceCategory.GOLD),
+                    Triple("CEYREK_ESKI", "Çeyrek Eski", PriceCategory.GOLD),
+                    Triple("YARIM_YENI", "Yarım Yeni", PriceCategory.GOLD),
+                    Triple("TEK_YENI", "Tam Yeni", PriceCategory.GOLD),
+                    Triple("ATA_YENI", "Ata Altın", PriceCategory.GOLD),
+                    Triple("GREMSE_YENI", "Gremse", PriceCategory.GOLD),
+                    Triple("USDTRY", "USD/TRY", PriceCategory.CURRENCY),
+                    Triple("EURTRY", "EUR/TRY", PriceCategory.CURRENCY),
+                    Triple("GBPTRY", "GBP/TRY", PriceCategory.CURRENCY),
+                    Triple("CHFTRY", "CHF/TRY", PriceCategory.CURRENCY),
+                    Triple("ONS", "Ons Altın", PriceCategory.PRECIOUS_METALS),
+                    Triple("GUMUSTRY", "Gümüş (Gram)", PriceCategory.PRECIOUS_METALS)
+                )
+
+                for ((sym, name, cat) in mappings) {
+                    if (dataObj.has(sym)) {
+                        val itemObj = dataObj.optJSONObject(sym) ?: continue
+                        val buy = SmartNumberParser.parse(itemObj.opt("alis"))
+                        val sell = SmartNumberParser.parse(itemObj.opt("satis"))
+                        val chg = SmartNumberParser.parse(itemObj.opt("degisim"))
+                        if (buy > 0.0 || sell > 0.0) {
+                            list.add(
+                                PriceItem(
+                                    source = PriceSourceType.HAREM,
+                                    symbol = sym,
+                                    name = name,
+                                    category = cat,
+                                    buyPrice = if (buy > 0) buy else sell,
+                                    sellPrice = if (sell > 0) sell else buy,
+                                    currency = if (sym == "ONS") "USD" else "TL",
+                                    changePercent = chg,
+                                    timestamp = timeNow,
+                                    trend = if (chg > 0) TrendDirection.UP else if (chg < 0) TrendDirection.DOWN else TrendDirection.STABLE
                                 )
-                            }
+                            )
                         }
                     }
                 }
 
-                if (currencyRaw != null) {
-                    val cObj = JSONObject(currencyRaw)
-                    val cMap = listOf(
-                        Pair("USD", "USD/TRY"),
-                        Pair("EUR", "EUR/TRY"),
-                        Pair("GBP", "GBP/TRY"),
-                        Pair("CHF", "CHF/TRY")
-                    )
-                    for ((k, name) in cMap) {
-                        if (cObj.has(k)) {
-                            val itm = cObj.getJSONObject(k)
-                            val buy = SmartNumberParser.parse(itm.opt("alis"))
-                            val sell = SmartNumberParser.parse(itm.opt("satis"))
-                            val chg = SmartNumberParser.parse(itm.opt("degisim"))
-                            if (buy > 0.0 || sell > 0.0) {
-                                list.add(
-                                    PriceItem(
-                                        source = sourceType,
-                                        symbol = k,
-                                        name = name,
-                                        category = PriceCategory.CURRENCY,
-                                        buyPrice = if (buy > 0) buy else sell,
-                                        sellPrice = if (sell > 0) sell else buy,
-                                        currency = "TL",
-                                        changePercent = chg,
-                                        timestamp = timeNow,
-                                        trend = if (chg > 0) TrendDirection.UP else if (chg < 0) TrendDirection.DOWN else TrendDirection.STABLE
-                                    )
+                if (list.isNotEmpty()) return@withContext Result.success(list)
+            } catch (_: Exception) {}
+        }
+
+        Result.failure(Exception("Harem Altın canlı sunucusuna ulaşılamadı."))
+    }
+}
+
+class AltinkaynakPriceSource : IPriceSource {
+    override val sourceType = PriceSourceType.ALTINKAYNAK
+
+    override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
+        val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        val list = mutableListOf<PriceItem>()
+
+        try {
+            val html = NetworkClient.get("https://www.altinkaynak.com/", "https://www.altinkaynak.com/")
+            if (html != null && html.contains("Altınkaynak")) {
+                val patterns = listOf(
+                    Triple("Has Altın", "Has Altın", PriceCategory.GOLD),
+                    Triple("Külçe Altın", "Külçe Altın", PriceCategory.GOLD),
+                    Triple("Ata Cumhuriyet", "Ata Altın", PriceCategory.GOLD),
+                    Triple("Çeyrek Altın", "Çeyrek Yeni", PriceCategory.GOLD),
+                    Triple("Dolar", "USD/TRY", PriceCategory.CURRENCY),
+                    Triple("Euro", "EUR/TRY", PriceCategory.CURRENCY)
+                )
+
+                for ((label, stdName, cat) in patterns) {
+                    val p = Pattern.compile("$label\\s*</td>.*?<td[^>]*>([0-9.,-]+)</td>\\s*<td[^>]*>([0-9.,]+)</td>\\s*<td[^>]*>([0-9.,]+)</td>", Pattern.DOTALL)
+                    val m = p.matcher(html)
+                    if (m.find()) {
+                        val chg = SmartNumberParser.parse(m.group(1))
+                        val buy = SmartNumberParser.parse(m.group(2))
+                        val sell = SmartNumberParser.parse(m.group(3))
+                        if (buy > 0.0 || sell > 0.0) {
+                            list.add(
+                                PriceItem(
+                                    source = PriceSourceType.ALTINKAYNAK,
+                                    symbol = label.uppercase(Locale.ENGLISH).replace(" ", "_"),
+                                    name = stdName,
+                                    category = cat,
+                                    buyPrice = if (buy > 0) buy else sell,
+                                    sellPrice = if (sell > 0) sell else buy,
+                                    currency = "TL",
+                                    changePercent = chg,
+                                    timestamp = timeNow,
+                                    trend = if (chg > 0) TrendDirection.UP else if (chg < 0) TrendDirection.DOWN else TrendDirection.STABLE
                                 )
-                            }
+                            )
                         }
                     }
                 }
 
-                if (list.isNotEmpty()) list else null
-            } catch (_: Exception) {
-                null
+                val onsMatcher = Pattern.compile("ONS\\s*:\\s*([0-9.,]+)").matcher(html)
+                if (onsMatcher.find()) {
+                    val onsVal = SmartNumberParser.parse(onsMatcher.group(1))
+                    if (onsVal > 0.0) {
+                        list.add(
+                            PriceItem(
+                                source = PriceSourceType.ALTINKAYNAK,
+                                symbol = "ONS",
+                                name = "Ons Altın",
+                                category = PriceCategory.PRECIOUS_METALS,
+                                buyPrice = onsVal,
+                                sellPrice = onsVal,
+                                currency = "USD",
+                                timestamp = timeNow
+                            )
+                        )
+                    }
+                }
+
+                if (list.isNotEmpty()) return@withContext Result.success(list)
             }
-        }
+        } catch (_: Exception) {}
 
-        fun getRealisticFallback(sourceType: PriceSourceType): List<PriceItem> {
-            val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            return listOf(
-                PriceItem(sourceType, "GA", "Gram Altın", PriceCategory.GOLD, 6745.0, 6770.0, "TL", 0.25, timeNow),
-                PriceItem(sourceType, "HAS", "Has Altın", PriceCategory.GOLD, 6750.0, 6775.0, "TL", 0.25, timeNow),
-                PriceItem(sourceType, "CEYREK", "Çeyrek Yeni", PriceCategory.GOLD, 10980.0, 11090.0, "TL", 0.15, timeNow),
-                PriceItem(sourceType, "YARIM", "Yarım Yeni", PriceCategory.GOLD, 21960.0, 22180.0, "TL", 0.15, timeNow),
-                PriceItem(sourceType, "TAM", "Tam Yeni", PriceCategory.GOLD, 43900.0, 44250.0, "TL", 0.15, timeNow),
-                PriceItem(sourceType, "ATA", "Ata Altın", PriceCategory.GOLD, 45200.0, 45600.0, "TL", 0.20, timeNow),
-                PriceItem(sourceType, "AYAR22", "22 Ayar", PriceCategory.GOLD, 6150.0, 6290.0, "TL", 0.18, timeNow),
-                PriceItem(sourceType, "AYAR14", "14 Ayar", PriceCategory.GOLD, 3850.0, 4700.0, "TL", 0.10, timeNow),
-                PriceItem(sourceType, "GREMSE", "Gremse", PriceCategory.GOLD, 109200.0, 110400.0, "TL", 0.20, timeNow),
-                PriceItem(sourceType, "USDTRY", "USD/TRY", PriceCategory.CURRENCY, 41.25, 41.35, "TL", 0.05, timeNow),
-                PriceItem(sourceType, "EURTRY", "EUR/TRY", PriceCategory.CURRENCY, 48.45, 48.60, "TL", -0.02, timeNow),
-                PriceItem(sourceType, "GBPTRY", "GBP/TRY", PriceCategory.CURRENCY, 56.10, 56.40, "TL", 0.10, timeNow),
-                PriceItem(sourceType, "ONS", "Ons Altın", PriceCategory.PRECIOUS_METALS, 4280.0, 4285.0, "USD", 0.30, timeNow),
-                PriceItem(sourceType, "GUMUS", "Gümüş (Gram)", PriceCategory.PRECIOUS_METALS, 98.50, 102.0, "TL", 0.40, timeNow)
-            )
-        }
+        Result.failure(Exception("Altınkaynak verisi şu anda alınamıyor."))
+    }
+}
+
+class OdaciPriceSource : IPriceSource {
+    override val sourceType = PriceSourceType.ODACI
+
+    override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
+        val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        val list = mutableListOf<PriceItem>()
+
+        try {
+            val html = NetworkClient.get("https://odaci.com/", "https://odaci.com/")
+            if (html != null && html.contains("Odaci.com")) {
+                val rowPattern = Pattern.compile("<tr[^>]*>\\s*<td[^>]*>([A-Z0-9]+)\\s+([^<]+)</td>\\s*<td[^>]*>([0-9.,]+)</td>\\s*<td[^>]*>([0-9.,]+)</td>", Pattern.DOTALL)
+                val matcher = rowPattern.matcher(html)
+
+                val symbolMap = mapOf(
+                    "GRT" to Pair("Gram Altın", PriceCategory.GOLD),
+                    "GRB" to Pair("Bozuk Gram", PriceCategory.GOLD),
+                    "CEY" to Pair("Çeyrek Yeni", PriceCategory.GOLD),
+                    "YRM" to Pair("Yarım Yeni", PriceCategory.GOLD),
+                    "LRA" to Pair("Tam Yeni", PriceCategory.GOLD),
+                    "ATA" to Pair("Ata Altın", PriceCategory.GOLD),
+                    "GRY" to Pair("Gremse", PriceCategory.GOLD),
+                    "E22" to Pair("22 Ayar", PriceCategory.GOLD),
+                    "E14" to Pair("14 Ayar", PriceCategory.GOLD),
+                    "USD" to Pair("USD/TRY", PriceCategory.CURRENCY),
+                    "EUR" to Pair("EUR/TRY", PriceCategory.CURRENCY),
+                    "GBP" to Pair("GBP/TRY", PriceCategory.CURRENCY),
+                    "CHF" to Pair("CHF/TRY", PriceCategory.CURRENCY)
+                )
+
+                while (matcher.find()) {
+                    val code = matcher.group(1).trim()
+                    val buy = SmartNumberParser.parse(matcher.group(3))
+                    val sell = SmartNumberParser.parse(matcher.group(4))
+
+                    symbolMap[code]?.let { (stdName, cat) ->
+                        if (buy > 0.0 || sell > 0.0) {
+                            list.add(
+                                PriceItem(
+                                    source = PriceSourceType.ODACI,
+                                    symbol = code,
+                                    name = stdName,
+                                    category = cat,
+                                    buyPrice = if (buy > 0) buy else sell,
+                                    sellPrice = if (sell > 0) sell else buy,
+                                    currency = "TL",
+                                    timestamp = timeNow
+                                )
+                            )
+                        }
+                    }
+                }
+
+                if (list.isNotEmpty()) return@withContext Result.success(list)
+            }
+        } catch (_: Exception) {}
+
+        Result.failure(Exception("Odacı Döviz verisi alınamadı."))
     }
 }
 
@@ -376,15 +375,14 @@ class KapalicarsiPriceSource : IPriceSource {
     override val sourceType = PriceSourceType.KAPALICARSI
 
     override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
-        val directUrls = listOf(
+        val urls = listOf(
             "https://kapalicarsi.apiluna.org",
-            "https://canlipiyasalar.haremaltin.com/tmp/altin.json",
-            "https://www.haremaltin.com/dashboard/ajax/doviz"
+            "https://kapali-carsi-altin-api.vercel.app/api/altin"
         )
 
-        for (url in directUrls) {
+        for (url in urls) {
             try {
-                val raw = NetworkClient.getSafeString(url) ?: continue
+                val raw = NetworkClient.get(url) ?: continue
                 val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                 val list = mutableListOf<PriceItem>()
 
@@ -395,6 +393,7 @@ class KapalicarsiPriceSource : IPriceSource {
                         val code = obj.optString("code")
                         val buy = SmartNumberParser.parse(obj.opt("alis"))
                         val sell = SmartNumberParser.parse(obj.opt("satis"))
+
                         if (buy > 0.0 || sell > 0.0) {
                             val cat = when {
                                 code.contains("USD") || code.contains("EUR") || code.contains("GBP") -> PriceCategory.CURRENCY
@@ -413,6 +412,7 @@ class KapalicarsiPriceSource : IPriceSource {
                                 "ONS" -> "Ons Altın"
                                 else -> code.replace("_", " ")
                             }
+
                             list.add(
                                 PriceItem(
                                     source = PriceSourceType.KAPALICARSI,
@@ -428,182 +428,20 @@ class KapalicarsiPriceSource : IPriceSource {
                         }
                     }
                     if (list.isNotEmpty()) return@withContext Result.success(list)
-                } else if (raw.trim().startsWith("{")) {
-                    val root = JSONObject(raw)
-                    val dataObj = if (root.has("data")) root.getJSONObject("data") else root
-                    val defs = listOf(
-                        Triple("ALTIN", "Gram Altın", PriceCategory.GOLD),
-                        Triple("KULCEALTIN", "Has Altın", PriceCategory.GOLD),
-                        Triple("CEYREK_YENI", "Çeyrek Yeni", PriceCategory.GOLD),
-                        Triple("YARIM_YENI", "Yarım Yeni", PriceCategory.GOLD),
-                        Triple("TEK_YENI", "Tam Yeni", PriceCategory.GOLD),
-                        Triple("ATA_YENI", "Ata Altın", PriceCategory.GOLD),
-                        Triple("AYAR22", "22 Ayar", PriceCategory.GOLD),
-                        Triple("AYAR14", "14 Ayar", PriceCategory.GOLD),
-                        Triple("USDTRY", "USD/TRY", PriceCategory.CURRENCY),
-                        Triple("EURTRY", "EUR/TRY", PriceCategory.CURRENCY),
-                        Triple("GBPTRY", "GBP/TRY", PriceCategory.CURRENCY),
-                        Triple("ONS", "Ons Altın", PriceCategory.PRECIOUS_METALS)
-                    )
-                    for ((sym, name, cat) in defs) {
-                        if (dataObj.has(sym)) {
-                            val itm = dataObj.optJSONObject(sym)
-                            if (itm != null) {
-                                val buy = SmartNumberParser.parse(itm.opt("alis"))
-                                val sell = SmartNumberParser.parse(itm.opt("satis"))
-                                val chg = SmartNumberParser.parse(itm.opt("degisim"))
-                                if (buy > 0.0 || sell > 0.0) {
-                                    list.add(
-                                        PriceItem(
-                                            source = PriceSourceType.KAPALICARSI,
-                                            symbol = sym,
-                                            name = name,
-                                            category = cat,
-                                            buyPrice = if (buy > 0) buy else sell,
-                                            sellPrice = if (sell > 0) sell else buy,
-                                            currency = if (sym == "ONS") "USD" else "TL",
-                                            changePercent = chg,
-                                            timestamp = timeNow
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    if (list.isNotEmpty()) return@withContext Result.success(list)
                 }
             } catch (_: Exception) {}
         }
 
-        UniversalBackupProvider.fetchFromTruncgil(PriceSourceType.KAPALICARSI)?.let {
-            return@withContext Result.success(it)
-        }
-
-        UniversalBackupProvider.fetchFromGenelpara(PriceSourceType.KAPALICARSI)?.let {
-            return@withContext Result.success(it)
-        }
-
-        Result.success(UniversalBackupProvider.getRealisticFallback(PriceSourceType.KAPALICARSI))
-    }
-}
-
-class HaremPriceSource : IPriceSource {
-    override val sourceType = PriceSourceType.HAREM
-
-    override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
-        val urls = listOf(
-            "https://canlipiyasalar.haremaltin.com/tmp/altin.json",
-            "https://www.haremaltin.com/dashboard/ajax/doviz"
-        )
-
-        for (url in urls) {
-            try {
-                val raw = NetworkClient.getSafeString(url, "https://canlipiyasalar.haremaltin.com/") ?: continue
-                val root = JSONObject(raw)
-                val dataObj = if (root.has("data")) root.getJSONObject("data") else root
-                val timeNow = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                val list = mutableListOf<PriceItem>()
-
-                val defs = listOf(
-                    Triple("ALTIN", "Gram Altın", PriceCategory.GOLD),
-                    Triple("KULCEALTIN", "Has Altın", PriceCategory.GOLD),
-                    Triple("AYAR22", "22 Ayar", PriceCategory.GOLD),
-                    Triple("AYAR14", "14 Ayar", PriceCategory.GOLD),
-                    Triple("CEYREK_YENI", "Çeyrek Yeni", PriceCategory.GOLD),
-                    Triple("CEYREK_ESKI", "Çeyrek Eski", PriceCategory.GOLD),
-                    Triple("YARIM_YENI", "Yarım Yeni", PriceCategory.GOLD),
-                    Triple("TEK_YENI", "Tam Yeni", PriceCategory.GOLD),
-                    Triple("ATA_YENI", "Ata Altın", PriceCategory.GOLD),
-                    Triple("GREMSE_YENI", "Gremse", PriceCategory.GOLD),
-                    Triple("USDTRY", "USD/TRY", PriceCategory.CURRENCY),
-                    Triple("EURTRY", "EUR/TRY", PriceCategory.CURRENCY),
-                    Triple("GBPTRY", "GBP/TRY", PriceCategory.CURRENCY),
-                    Triple("CHFTRY", "CHF/TRY", PriceCategory.CURRENCY),
-                    Triple("ONS", "Ons Altın", PriceCategory.PRECIOUS_METALS),
-                    Triple("GUMUSTRY", "Gümüş", PriceCategory.PRECIOUS_METALS)
-                )
-
-                for ((sym, name, cat) in defs) {
-                    if (dataObj.has(sym)) {
-                        val item = dataObj.optJSONObject(sym)
-                        if (item != null) {
-                            val buy = SmartNumberParser.parse(item.opt("alis"))
-                            val sell = SmartNumberParser.parse(item.opt("satis"))
-                            val chg = SmartNumberParser.parse(item.opt("degisim"))
-                            if (buy > 0.0 || sell > 0.0) {
-                                list.add(
-                                    PriceItem(
-                                        source = PriceSourceType.HAREM,
-                                        symbol = sym,
-                                        name = name,
-                                        category = cat,
-                                        buyPrice = if (buy > 0) buy else sell,
-                                        sellPrice = if (sell > 0) sell else buy,
-                                        currency = if (sym == "ONS") "USD" else "TL",
-                                        changePercent = chg,
-                                        timestamp = timeNow,
-                                        trend = when {
-                                            chg > 0.0 -> TrendDirection.UP
-                                            chg < 0.0 -> TrendDirection.DOWN
-                                            else -> TrendDirection.STABLE
-                                        }
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (list.isNotEmpty()) return@withContext Result.success(list)
-            } catch (_: Exception) {}
-        }
-
-        UniversalBackupProvider.fetchFromTruncgil(PriceSourceType.HAREM)?.let {
-            return@withContext Result.success(it)
-        }
-
-        UniversalBackupProvider.fetchFromGenelpara(PriceSourceType.HAREM)?.let {
-            return@withContext Result.success(it)
-        }
-
-        Result.success(UniversalBackupProvider.getRealisticFallback(PriceSourceType.HAREM))
-    }
-}
-
-class AltinkaynakPriceSource : IPriceSource {
-    override val sourceType = PriceSourceType.ALTINKAYNAK
-
-    override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
-        UniversalBackupProvider.fetchFromTruncgil(PriceSourceType.ALTINKAYNAK)?.let {
-            return@withContext Result.success(it)
-        }
-        UniversalBackupProvider.fetchFromGenelpara(PriceSourceType.ALTINKAYNAK)?.let {
-            return@withContext Result.success(it)
-        }
-        Result.success(UniversalBackupProvider.getRealisticFallback(PriceSourceType.ALTINKAYNAK))
-    }
-}
-
-class OdaciPriceSource : IPriceSource {
-    override val sourceType = PriceSourceType.ODACI
-
-    override suspend fun fetchPrices(): Result<List<PriceItem>> = withContext(Dispatchers.IO) {
-        UniversalBackupProvider.fetchFromTruncgil(PriceSourceType.ODACI)?.let {
-            return@withContext Result.success(it)
-        }
-        UniversalBackupProvider.fetchFromGenelpara(PriceSourceType.ODACI)?.let {
-            return@withContext Result.success(it)
-        }
-        Result.success(UniversalBackupProvider.getRealisticFallback(PriceSourceType.ODACI))
+        Result.failure(Exception("Kapalıçarşı canlı verisi şu anda alınamıyor."))
     }
 }
 
 class PriceRepository {
     private val sources: Map<PriceSourceType, IPriceSource> = mapOf(
-        PriceSourceType.KAPALICARSI to KapalicarsiPriceSource(),
         PriceSourceType.HAREM to HaremPriceSource(),
         PriceSourceType.ALTINKAYNAK to AltinkaynakPriceSource(),
-        PriceSourceType.ODACI to OdaciPriceSource()
+        PriceSourceType.ODACI to OdaciPriceSource(),
+        PriceSourceType.KAPALICARSI to KapalicarsiPriceSource()
     )
 
     suspend fun getPrices(sourceType: PriceSourceType): Result<List<PriceItem>> {
@@ -634,7 +472,7 @@ class MainViewModel(application: android.app.Application) : AndroidViewModel(app
     private val prefs = application.getSharedPreferences("kuyumcu_prefs", Context.MODE_PRIVATE)
 
     private val _currentSource = MutableStateFlow(
-        PriceSourceType.entries.find { it.name == prefs.getString("selected_source", PriceSourceType.KAPALICARSI.name) } ?: PriceSourceType.KAPALICARSI
+        PriceSourceType.entries.find { it.name == prefs.getString("selected_source", PriceSourceType.HAREM.name) } ?: PriceSourceType.HAREM
     )
     val currentSource: StateFlow<PriceSourceType> = _currentSource.asStateFlow()
 
@@ -653,9 +491,9 @@ class MainViewModel(application: android.app.Application) : AndroidViewModel(app
     val comparisonData: StateFlow<Map<PriceSourceType, List<PriceItem>>> = _comparisonData.asStateFlow()
 
     private var pollingJob: Job? = null
-    private var lastSuccessfulPrices = mutableMapOf<PriceSourceType, List<PriceItem>>()
-    private var lastSuccessTimes = mutableMapOf<PriceSourceType, String>()
-    private var previousPricesMap = mutableMapOf<String, Double>()
+    private val sourceCaches = mutableMapOf<PriceSourceType, List<PriceItem>>()
+    private val sourceCacheTimes = mutableMapOf<PriceSourceType, String>()
+    private val previousPricesMap = mutableMapOf<String, Double>()
 
     init {
         startPolling()
@@ -665,9 +503,9 @@ class MainViewModel(application: android.app.Application) : AndroidViewModel(app
         if (_currentSource.value == source) return
         _currentSource.value = source
         prefs.edit().putString("selected_source", source.name).apply()
-        
-        val cached = lastSuccessfulPrices[source]
-        val cachedTime = lastSuccessTimes[source]
+
+        val cached = sourceCaches[source]
+        val cachedTime = sourceCacheTimes[source]
         if (cached != null && cached.isNotEmpty()) {
             _screenState.value = ScreenState.Success(cached, cachedTime ?: "", isFromCache = true)
         } else {
@@ -717,23 +555,28 @@ class MainViewModel(application: android.app.Application) : AndroidViewModel(app
         val result = repo.getPrices(source)
         result.onSuccess { rawList ->
             val updatedWithTrends = rawList.map { item ->
-                val prev = previousPricesMap[item.symbol]
+                val key = "${source.name}_${item.symbol}"
+                val prev = previousPricesMap[key]
                 val trend = when {
                     prev == null || prev == item.buyPrice -> item.trend
                     item.buyPrice > prev -> TrendDirection.UP
                     else -> TrendDirection.DOWN
                 }
-                previousPricesMap[item.symbol] = item.buyPrice
+                previousPricesMap[key] = item.buyPrice
                 item.copy(trend = trend)
             }
             val time = updatedWithTrends.firstOrNull()?.timestamp ?: SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            lastSuccessfulPrices[source] = updatedWithTrends
-            lastSuccessTimes[source] = time
+            sourceCaches[source] = updatedWithTrends
+            sourceCacheTimes[source] = time
             _screenState.value = ScreenState.Success(updatedWithTrends, time, isFromCache = false)
         }.onFailure { _ ->
-            val cached = lastSuccessfulPrices[source] ?: UniversalBackupProvider.getRealisticFallback(source)
-            val time = lastSuccessTimes[source] ?: SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            _screenState.value = ScreenState.Success(cached, time, isFromCache = true)
+            val cached = sourceCaches[source]
+            val time = sourceCacheTimes[source]
+            _screenState.value = ScreenState.Error(
+                message = "${source.displayName} verisi alınamadı.",
+                lastSuccessPrices = cached,
+                lastSuccessTime = time
+            )
         }
     }
 }
@@ -878,7 +721,7 @@ fun BoardScreen(viewModel: MainViewModel) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = GoldPrimary)
                         Spacer(modifier = Modifier.height(10.dp))
-                        Text("Piyasa verileri alınıyor...", fontSize = 13.sp)
+                        Text("${currentSource.displayName} verileri alınıyor...", fontSize = 13.sp)
                     }
                 }
             }
@@ -888,7 +731,7 @@ fun BoardScreen(viewModel: MainViewModel) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = if (s.isFromCache) "Son Kayıtlı Fiyatlar • Güncelleniyor..." else "Canlı Piyasa • ${s.timestamp}",
+                        text = if (s.isFromCache) "Son Başarılı Veri: ${s.timestamp}" else "Canlı Piyasa • ${s.timestamp}",
                         fontSize = 11.sp,
                         color = if (s.isFromCache) GoldPrimary else ColorRise,
                         fontWeight = FontWeight.Bold
@@ -910,6 +753,27 @@ fun BoardScreen(viewModel: MainViewModel) {
                 )
             }
             is ScreenState.Error -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = s.message,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                        if (s.lastSuccessTime != null) {
+                            Text(
+                                text = "Son başarılı veri: ${s.lastSuccessTime}",
+                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
                 if (s.lastSuccessPrices != null && s.lastSuccessPrices.isNotEmpty()) {
                     PriceTableView(
                         prices = if (onlyFavorites) s.lastSuccessPrices.filter { favorites.contains(it.name) } else s.lastSuccessPrices,
@@ -1245,16 +1109,16 @@ fun SettingsScreen(viewModel: MainViewModel) {
             shape = RoundedCornerShape(8.dp)
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
-                Text(text = "Hakkında & Kesintisiz Veri Motoru", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(text = "Hakkında & Doğrulanmış Kaynaklar", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Uygulama: Kuyumcu Ekranı v1.0.1\nÖzellik: Çok Katmanlı Otomatik Yedek Sunucu (Failover Engine)\nBağlantı Türü: Canlı Serbest Piyasa & Döviz Akışı",
+                    text = "Uygulama: Kuyumcu Ekranı v1.0.2\nKaynaklar: Harem Altın, Altınkaynak, Odacı Döviz, Kapalıçarşı",
                     fontSize = 12.sp,
                     lineHeight = 16.sp
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "Veriler Kapalıçarşı, Harem Altın, Altınkaynak ve Odacı piyasa kurları referans alınarak otomatik derlenir. Birincil sunucuda erişim sorunu oluştuğunda yedek finans ağları devreye girer.",
+                    text = "Bu uygulama bağımsız bir fiyat takip uygulamasıdır. Kullanılan piyasa verileri ilgili veri kaynaklarının kamuya açık servislerinden doğrudan alınmaktadır. Kaynaklar arasında veri kopyalama yapılmaz; herhangi bir kaynağa erişilemediğinde sahte fiyat üretilmez.",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                     lineHeight = 15.sp
